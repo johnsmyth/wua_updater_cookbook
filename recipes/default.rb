@@ -1,84 +1,78 @@
-#
-# Author:: Doug MacEachern <dougm@vmware.com>
-# Cookbook Name:: windows
-# Recipe:: update
-#
-# Copyright 2010, VMware, Inc.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-# 
-#     http://www.apache.org/licenses/LICENSE-2.0
-# 
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
+update_script = "#{Chef::Config[:file_cache_path]}\\InstallUpdates.ps1"
+task_name = 'CHEF Install Windows Updates'
+output_file = "#{ENV['temp']}\\InstalUpdates.out.txt"
 
-#download and install windows updates
-#ruby_block 'install updates' do
-#  block do
-    #adapted from http://msdn.microsoft.com/en-us/library/aa387102%28VS.85%29.aspx
-    require 'win32ole'
-    
-    session = WIN32OLE.new("Microsoft.Update.Session")
-    searcher = session.CreateUpdateSearcher
-    updates_query = "IsInstalled=0 and Type='Software' and AutoSelectOnWebSites=1" #XXX make this an attribute?
-    Chef::Log.debug("Searching for updates...")
-     puts "Searching for updates..."
-    required_updates = searcher.search(updates_query)
-    
-    if required_updates.updates.count > 0
-      updates_to_download = WIN32OLE.new("Microsoft.Update.UpdateColl")
-    
-    
-      required_updates.updates.each do |update|
-        Chef::Log.debug("Required update found: #{update.title}")
-        puts "Required update found: #{update.title}"
+cookbook_file update_script do
+  source 'InstallUpdates.ps1'
+end
 
-        updates_to_download.add(update) unless update.isdownloaded
-        update.AcceptEula unless update.EulaAccepted
-      end
-    
-      if updates_to_download.count > 0
-        Chef::Log.info("Downloading #{updates_to_download.count} updates (this may take a long time)...")
-        puts "Downloading #{updates_to_download.count} updates (this may take a long time)..."
-    
-        downloader = session.CreateUpdateDownloader
-        downloader.updates = updates_to_download
-        downloader.download
-      end
-    
-      updates_to_install = WIN32OLE.new("Microsoft.Update.UpdateColl")
-    
-      required_updates.updates.each do |update|
-        updates_to_install.add(update) if update.isdownloaded
-      end
-    
-      Chef::Log.info("Installing #{updates_to_install.count} updates (this may take a long time)...")
-      puts "Installing #{updates_to_install.count} updates (this may take a long time)..."
+windows_task task_name do
+  command "powershell #{update_script} > #{output_file}"
+  start_time '00:00'
+  start_day '10/26/2005'
+  action :create
+  frequency :once
+  run_level :highest
+end
 
-      installer = session.CreateUpdateInstaller
-      installer.updates= updates_to_install 
-      install_result = installer.install
-    	
-      puts "Installation Result: #{install_result.ResultCode}"
-      Chef::Log.debug("Installation Result: #{install_result.ResultCode}")
-    
-      if install_result.RebootRequired
-        Chef::Log.warn("REBOOT IS REQUIRED")
-         puts "REBOOT IS REQUIRED"
-    #    WMI::Win32_OperatingSystem.find(:first).reboot
-      else
-        Chef::Log.debug("No reboot required")
-        puts "No reboot required"
-      end
-    else
-      Chef::Log.info("No updates available")
-      puts "No updates available"
-    end
-#  end
-#end
+powershell_script 'run updates tasks' do
+  code <<-EOH
+    $escaped_command = '#{update_script}' -replace "\\\\", "\\\\"
+
+    $tasks=@()
+    $tasks+=gwmi Win32_Process -Filter "name = 'powershell.exe' and CommandLine like '%$($escaped_command)%'" | select ProcessId | % { $_.ProcessId }
+
+    $taskResult = schtasks /RUN /I /TN '#{task_name}'
+    if($LastExitCode -gt 0){
+        throw "Unable to run scheduled task. Message from task was $taskResult"
+    }
+    Write-output "Launched task. Waiting for task to launch command..." -Verbose
+     do{
+        # What if its already complete?  how do I check that?
+        # Also - add timeout logic just in case????
+        $taskProc=gwmi Win32_Process -Filter "name = 'powershell.exe' and CommandLine like '%$($escaped_command)%'" | select ProcessId| % { $_.ProcessId } | ? { !($tasks -contains $_) }
+
+        Write-output "sleeping..."
+        Start-Sleep -Second 1
+    }
+    Until($taskProc -ne $null)
+
+    Write-output "script launched with pid: $($taskProc)"
+    Write-output "waiting for script to complete...."
+    while( get-process | where { $_.id -eq $taskProc }) {
+        Write-output "sleeping..."
+        Start-Sleep -Second 1
+    }
+    Write-output "script complete!"
+
+  EOH
+  #  not_if { true }
+end
+
+powershell_script 'check return code' do
+  code <<-EOH
+    ( gc #{output_file} | select-string "Install ResultCode" ) -match "Install ResultCode:\\s+(\\S+)"
+    $rc = $Matches[1]
+
+    # 2 = Succeeded, 3 = Succeeded with Errors, 4 = Failed, 5 = Aborted
+    switch ($rc)
+    {
+        2 { write-output "Windows Updates installed successfully" }
+        3 { write-output "Windows Updates succeeded but with errors" }
+        4 { throw " Error - Windows Updates failed.  ResultCode: $($rc)" }
+        5 { throw " Error - Windows Updates aborted.  ResultCode: $($rc)" }
+        default { throw " Error - updates did not install correctly.  ResultCode: $($rc)" }
+    }
+  EOH
+end
+
+reboot 'reboot after patch installation' do
+  action :request_reboot
+  reason 'windows update (run via chef) installed patches that require a reboot'
+  delay_mins 1
+  guard_interpreter :powershell_script
+  only_if <<-EOH
+    $output = ( gc #{output_file} | select-string "Reboot Required" ) -match "Reboot Required:\\s+(\\S+)"
+    $Matches[1] -eq "True"
+  EOH
+end
