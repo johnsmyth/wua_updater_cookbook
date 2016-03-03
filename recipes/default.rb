@@ -21,22 +21,25 @@ powershell_script 'run updates tasks' do
 
     $tasks=@()
     $tasks+=gwmi Win32_Process -Filter "name = 'powershell.exe' and CommandLine like '%$($escaped_command)%'" | select ProcessId | % { $_.ProcessId }
-
-    $taskResult = schtasks /RUN /I /TN '#{task_name}'
-    if($LastExitCode -gt 0){
+    if($tasks.length -gt 0 ) {
+      $taskProc = $tasks[0]
+      Write-output "Running task found (pid = $($taskProc))...."
+    } else {
+      $taskResult = schtasks /RUN /I /TN '#{task_name}'
+      if($LastExitCode -gt 0){
         throw "Unable to run scheduled task. Message from task was $taskResult"
-    }
-    Write-output "Launched task. Waiting for task to launch command..." -Verbose
-     do{
-        # What if its already complete?  how do I check that?
-        # Also - add timeout logic just in case????
-        $taskProc=gwmi Win32_Process -Filter "name = 'powershell.exe' and CommandLine like '%$($escaped_command)%'" | select ProcessId| % { $_.ProcessId } | ? { !($tasks -contains $_) }
+      }
+      Write-output "Launched task. Waiting for task to launch command..." -Verbose
+      do{
+          # What if its already complete?  how do I check that?
+          # Also - add timeout logic just in case????
+          $taskProc=gwmi Win32_Process -Filter "name = 'powershell.exe' and CommandLine like '%$($escaped_command)%'" | select ProcessId| % { $_.ProcessId } | ? { !($tasks -contains $_) }
 
-        Write-output "sleeping..."
-        Start-Sleep -Second 1
+          Write-output "sleeping..."
+          Start-Sleep -Second 1
+      }
+      Until($taskProc -ne $null)
     }
-    Until($taskProc -ne $null)
-
     Write-output "script launched with pid: $($taskProc)"
     Write-output "waiting for script to complete...."
     while( get-process | where { $_.id -eq $taskProc }) {
@@ -48,6 +51,40 @@ powershell_script 'run updates tasks' do
   EOH
   #  not_if { true }
 end
+
+#powershell_script 'run updates tasks' do
+#  code <<-EOH
+#    $escaped_command = '#{update_script}' -replace "\\\\", "\\\\"
+#
+#    $tasks=@()
+#    $tasks+=gwmi Win32_Process -Filter "name = 'powershell.exe' and CommandLine like '%$($escaped_command)%'" | select ProcessId | % { $_.ProcessId }
+#
+#    $taskResult = schtasks /RUN /I /TN '#{task_name}'
+#    if($LastExitCode -gt 0){
+#        throw "Unable to run scheduled task. Message from task was $taskResult"
+#    }
+#    Write-output "Launched task. Waiting for task to launch command..." -Verbose
+#     do{
+#        # What if its already complete?  how do I check that?
+#        # Also - add timeout logic just in case????
+#        $taskProc=gwmi Win32_Process -Filter "name = 'powershell.exe' and CommandLine like '%$($escaped_command)%'" | select ProcessId| % { $_.ProcessId } | ? { !($tasks -contains $_) }
+#
+#        Write-output "sleeping..."
+#        Start-Sleep -Second 1
+#    }
+#    Until($taskProc -ne $null)
+#
+#    Write-output "script launched with pid: $($taskProc)"
+#    Write-output "waiting for script to complete...."
+#    while( get-process | where { $_.id -eq $taskProc }) {
+#        Write-output "sleeping..."
+#        Start-Sleep -Second 1
+#    }
+#    Write-output "script complete!"
+#
+#  EOH
+#  #  not_if { true }
+#end
 
 powershell_script 'check return code' do
   code <<-EOH
