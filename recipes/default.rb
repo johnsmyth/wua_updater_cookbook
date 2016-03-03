@@ -21,8 +21,8 @@ powershell_script 'run updates tasks' do
 
     $tasks=@()
     $tasks+=gwmi Win32_Process -Filter "name = 'powershell.exe' and CommandLine like '%$($escaped_command)%'" | select ProcessId | % { $_.ProcessId }
-    if($tasks.length -gt 0 ) {
-      $taskProc = $tasks[0]
+    $taskProc = $tasks[0]
+    if($taskProc) {
       Write-output "Running task found (pid = $($taskProc))...."
     } else {
       $taskResult = schtasks /RUN /I /TN '#{task_name}'
